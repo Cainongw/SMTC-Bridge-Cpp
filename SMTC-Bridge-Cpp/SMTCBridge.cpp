@@ -7,6 +7,8 @@
 #include <atomic>
 #include <iostream>
 #include <algorithm>
+#include <fstream>
+#include <iomanip>
 
 // --- 2. Windows 基础头文件 ---
 #include <windows.h>
@@ -48,10 +50,40 @@ static winrt::event_token g_playbackInfoToken;
 
 // ================= 内部辅助函数 =================
 
+
+
 std::string WinRTStringToString(hstring const& hstr) {
     return to_string(hstr);
 }
+void OnSessionManagerChanged();
+void worker() {
+    try {
+        // 延时确保 WinRT Runtime + Explorer + SMTC 都初始化完毕
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
+        init_apartment();
+
+        auto op = GlobalSystemMediaTransportControlsSessionManager::RequestAsync();
+        while (op.Status() == AsyncStatus::Started) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        g_manager = op.GetResults();
+        if (!g_manager) {
+            return;
+        }
+
+
+        auto sessions = g_manager.GetSessions();
+
+        g_sessionChangedToken =
+            g_manager.CurrentSessionChanged([](auto&&, auto&&) { OnSessionManagerChanged(); });
+
+        OnSessionManagerChanged();
+    }
+    catch (...) {
+    }
+}
 // 异步更新媒体属性 (歌名、封面)
 fire_and_forget UpdateMediaProperties(GlobalSystemMediaTransportControlsSession session) {
     try {
@@ -169,22 +201,7 @@ void OnSessionManagerChanged() {
 // ================= 导出接口 (extern "C") =================
 
 extern "C" __declspec(dllexport) void InitSMTC() {
-    try {
-        init_apartment();
-
-        auto op = GlobalSystemMediaTransportControlsSessionManager::RequestAsync();
-        // 简单轮询等待
-        while (op.Status() == AsyncStatus::Started) { Sleep(10); }
-
-        g_manager = op.GetResults();
-
-        if (g_manager) {
-            // 存储 sessionChangedToken
-            g_sessionChangedToken = g_manager.CurrentSessionChanged([](auto&&, auto&&) { OnSessionManagerChanged(); });
-            OnSessionManagerChanged();
-        }
-    }
-    catch (...) {}
+    std::thread(worker).detach();
 }
 
 extern "C" __declspec(dllexport) void SMTC_PlayPause() {

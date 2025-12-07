@@ -139,10 +139,25 @@ void OnSessionManagerChanged() {
     if (g_isChangingSession.exchange(true)) return;
 
     try {
-        auto session = g_manager.GetCurrentSession();
-        if (session) {
+        GlobalSystemMediaTransportControlsSession bestSession = nullptr;
+
+        auto sessions = g_manager.GetSessions();
+        for (auto const& s : sessions) {
+            auto info = s.GetPlaybackInfo();
+            if (info && info.PlaybackStatus() == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing) {
+                bestSession = s; // 优先选择正在播放的
+                break;
+            }
+        }
+
+        if (!bestSession) {
+            // 回退到 focused session
+            bestSession = g_manager.GetCurrentSession();
+        }
+
+        if (bestSession) {
             std::lock_guard<std::mutex> lock(g_dataMutex);
-            g_currentSession = session;
+            g_currentSession = bestSession;
             SetupSessionEvents(g_currentSession);
         }
     }

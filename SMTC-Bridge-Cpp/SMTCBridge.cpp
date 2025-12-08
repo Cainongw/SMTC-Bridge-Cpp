@@ -30,6 +30,7 @@ using namespace Windows::Storage::Streams;
 using namespace Windows::Foundation;
 
 // ================= 全局变量定义 =================
+std::atomic<bool> g_isInitialized{ false };
 std::mutex g_dataMutex;
 GlobalSystemMediaTransportControlsSessionManager g_manager = nullptr;
 GlobalSystemMediaTransportControlsSession g_currentSession = nullptr;
@@ -50,12 +51,12 @@ static winrt::event_token g_playbackInfoToken;
 
 // ================= 内部辅助函数 =================
 
-
+void OnSessionManagerChanged();
 
 std::string WinRTStringToString(hstring const& hstr) {
     return to_string(hstr);
 }
-void OnSessionManagerChanged();
+
 void worker() {
     try {
         // 延时确保 WinRT Runtime + Explorer + SMTC 都初始化完毕
@@ -201,7 +202,14 @@ void OnSessionManagerChanged() {
 // ================= 导出接口 (extern "C") =================
 
 extern "C" __declspec(dllexport) void InitSMTC() {
-    std::thread(worker).detach();
+    bool expected = false;
+    if (g_isInitialized.compare_exchange_strong(expected, true)) {
+        // 第一次调用，启动 worker 线程
+        std::thread(worker).detach();
+    }
+    else {
+        return;
+    }
 }
 
 extern "C" __declspec(dllexport) void SMTC_PlayPause() {
@@ -272,29 +280,15 @@ extern "C" __declspec(dllexport) void ShutdownSMTC() {
     try {
         // 1. 解除会话管理器事件
         if (g_manager && g_sessionChangedToken.value != 0) {
+            // 这是唯一一个必须手动解除，因为它是在 worker 线程中创建的。
             g_manager.CurrentSessionChanged(g_sessionChangedToken);
             g_sessionChangedToken = winrt::event_token{};
         }
 
-        // 2. 解除当前会话事件
-        if (g_currentSession) {
-            if (g_mediaPropertiesToken.value != 0) {
-                g_currentSession.MediaPropertiesChanged(g_mediaPropertiesToken);
-                g_mediaPropertiesToken = winrt::event_token{};
-            }
-            if (g_timelinePropertiesToken.value != 0) {
-                g_currentSession.TimelinePropertiesChanged(g_timelinePropertiesToken);
-                g_timelinePropertiesToken = winrt::event_token{};
-            }
-            if (g_playbackInfoToken.value != 0) {
-                g_currentSession.PlaybackInfoChanged(g_playbackInfoToken);
-                g_playbackInfoToken = winrt::event_token{};
-            }
-        }
-
-        // 3. 清理全局 WinRT 对象
-        g_currentSession = nullptr;
+        // 2. 清理全局 WinRT 对象 (依赖 RAII 自动处理 g_currentSession 的所有事件)
+        g_currentSession = nullptr; // 释放 WinRT 对象，其内部资源（包括事件）应被释放。
         g_manager = nullptr;
+
 
     }
     catch (...) {

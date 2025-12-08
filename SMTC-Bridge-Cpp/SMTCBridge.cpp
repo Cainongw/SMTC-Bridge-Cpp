@@ -211,7 +211,13 @@ extern "C" __declspec(dllexport) void InitSMTC() {
         return;
     }
 }
+extern "C" __declspec(dllexport) void SMTC_Play() {
+    if (g_currentSession) g_currentSession.TryPlayAsync();
+}
 
+extern "C" __declspec(dllexport) void SMTC_Pause() {
+    if (g_currentSession) g_currentSession.TryPauseAsync();
+}
 extern "C" __declspec(dllexport) void SMTC_PlayPause() {
     if (g_currentSession) g_currentSession.TryTogglePlayPauseAsync();
 }

@@ -2,109 +2,156 @@
 
 English | [简体中文](https://github.com/Cainongw/SMTC-Bridge-Cpp/tree/master/zh-cn)
 
-SMTCBridge is a lightweight C++ Dynamic Link Library (DLL) designed to bridge Windows System Media Transport Controls (SMTC) and master volume control functionality to applications using non-native languages, such as C# (for Unity/BepInEx Modding) and Python.
+**SMTCBridge** is a lightweight C++ Dynamic Link Library (DLL) designed to bridge Windows System Media Transport Controls (SMTC) and master volume control functionality to non-native languages such as C# (for Unity/BepInEx modding) and Python.
 
 # Features
-Media Information Retrieval (SMTC): Fetch the title, artist, playback timeline, and raw cover image data from the active media session.
 
-Playback Status: Query whether the media is currently playing (SMTC_GetPlaybackStatus).
+- **Media Information Retrieval (SMTC)**  
+  Retrieve the title, artist, playback timeline (position and duration), and raw album cover image data of the currently active media session.
 
-Playback Controls: Send media commands like Play/Pause (SMTC_PlayPause), Next Track (SMTC_Next), and Previous Track (SMTC_Previous).
+- **Event-Driven Architecture**  
+  The library uses C-style callback functions to proactively notify the external environment when media properties (such as song title or artist) change, eliminating the need for polling.
 
-System Volume Control (Core Audio): Implement system master volume adjustment using simulated keyboard events (SMTC_VolumeUp, SMTC_VolumeDown).
+- **Playback Control**  
+  Provides media control commands including Play/Pause, Next Track, and Previous Track.
 
-Polling/Query Design: Utilizes a data caching and pulling mechanism, simplifying integration on the C# side by avoiding complex cross-process callback delegate management.
+- **System Volume Control (Core Audio)**  
+  Exposes safe interfaces for controlling the system master volume (Volume Up/Down).
 
 # Build Requirements
-To successfully compile this library, your development environment must meet the following criteria:
 
-Operating System: Windows 10/11
+To build this library, the following requirements must be met:
 
-SDK: Windows SDK (Target SDK 10.0.19041.0 or newer recommended)
+- **Operating System**: Windows 10 / 11  
+- **SDK**: Windows SDK (target SDK 10.0.19041.0 or newer is recommended)  
+- **Compiler**: Visual Studio 2019 / 2022 (with C++17 or later support)  
+- **Dependencies**: C++/WinRT headers, `runtimeobject.lib`, and related system libraries
 
-Compiler: Visual Studio 2019/2022 (with C++17 support or higher)
+# Exported API Reference
 
-Dependencies: C++/WinRT headers, and linking libraries like runtimeobject.lib.
+## Lifecycle and Callbacks
 
-🚀 Integration and Usage
-1. Compilation and Deployment
-Compile the project as an x64 architecture DLL (e.g., SMTCBridge.dll).
+| Function | Description |
+|---|---|
+| InitSMTC() | Starts the internal worker thread. |
+| ShutdownSMTC() | Stops the thread and releases all resources. |
+| RegisterUpdateCallback(SMTC_UpdateCallback callback) | Registers a callback function (e.g. from C#). |
 
-Unity/BepInEx Modding: Place the compiled SMTCBridge.dll within your Mod directory, typically under BepInEx/plugins/YourModName/x86_64/.
+## Media Operations
 
-2. C# Calling Example (Unity Mod)
-You can use C#'s DllImport and MarshalAs to safely call the exported C API.
+| Function | Description |
+|---|---|
+| SMTC_GetTitle(char* buffer, int len) | Get the current track title |
+| SMTC_GetPlaybackStatus() | Get the current playback status |
+| SMTC_Play() | Sends a play command. Asynchronously requests the current session to start playback |
+| SMTC_Pause() | Sends a pause command. Asynchronously requests the current session to pause playback |
+| SMTC_PlayPause() | Toggles between play and pause |
+| SMTC_Next() | Sends the next-track command |
+| SMTC_Previous() | Sends the previous-track command |
+| SMTC_VolumeUp() | Increase system volume by 5% |
+| SMTC_VolumeDown() | Decrease system volume by 5% |
+| SMTC_SetVolume(float volume) | Set the system volume directly (0.0 – 1.0) |
 
-```C#
+# Usage
 
+## 1. Build and Deployment
+
+Build the project as an **x64 DLL** (for example, `SMTCBridge.dll`).
+
+**Unity / BepInEx mod placement path**:
+
+BepInEx/plugins/YourModName/x86_64/
+
+
+---
+
+## 3. C# Usage Example (for Unity Mods)
+
+Use `DllImport` and `MarshalAs` to call the exported C APIs via P/Invoke.
+
+```csharp
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class SmtcBridge { private const string DllName = "SMTCBridge";
+using System.Threading;
 
-    // --- Control and Initialization ---
-    [DllImport(DllName)]
-    public static extern void InitSMTC();
-    [DllImport(DllName)] public static extern void ShutdownSMTC(); // Must be called when the Mod exits!
+/// <summary>
+/// Interop wrapper and event dispatcher for the C++ SMTC DLL.
+/// Note: In Unity or other applications with a UI thread,
+/// you need a mechanism to capture the main thread's SynchronizationContext.
+/// </summary>
+public sealed class SMTCWrapper : IDisposable
+{
+    // --- 1. DllImport declarations for exported C++ functions ---
+    
+    private const string DllName = "SafeSMTC";
+    private const CallingConvention NativeCall = CallingConvention.Cdecl;
 
-    [DllImport(DllName)]
-    public static extern void SMTC_PlayPause();
-    // --- Data Retrieval (Note on buffer management) ---
-    // Returns string length (int) and fills the char* buffer [DllImport(DllName, CharSet = CharSet.Ansi, CallingConvention = CallingConvention.Cdecl)] public static extern int SMTC_GetTitle(StringBuilder buffer, int length);
-
-    // Get playback status
-    [DllImport(DllName)]
-    [return: MarshalAs(UnmanagedType.I1)] // C++ bool (1 byte)
-    public static extern bool SMTC_GetPlaybackStatus();
-    // C# Helper Method (for safely retrieving strings)
-    public static string GetCurrentTitle()
+    // Matches the C++ enum SMTC_EventType
+    public enum SMTC_EventType
     {
-        // 1. Call once to get the required length
-        int length = SMTC_GetTitle(null, 0); 
-        if (length <= 0) return string.Empty;
-        // 2. Call again to fill the buffer
-        StringBuilder buffer = new StringBuilder(length + 1);
-        SMTC_GetTitle(buffer, buffer.Capacity);
-        
-        return buffer.ToString();
+        MediaPropertiesChanged = 0, // Title, Artist, Cover changed
+        TimelineChanged = 1,        // Position, Duration changed
+        PlaybackStatusChanged = 2,  // Playback state changed
+        SessionChanged = 3          // Media session switched (e.g. player change)
     }
+
+    // Matches the C++ callback signature: void(__stdcall*)(SMTC_EventType eventType)
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate void SMTC_UpdateCallback(SMTC_EventType eventType);
+
+    // Lifecycle
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    private static extern void InitSMTC();
+    
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    private static extern void ShutdownSMTC();
+
+    // Callback registration
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    private static extern void RegisterUpdateCallback(SMTC_UpdateCallback callback);
+
+    // Getters
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    private static extern int SMTC_GetTitle(byte[] buffer, int len);
+    
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    private static extern int SMTC_GetArtist(byte[] buffer, int len);
+    
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    private static extern bool SMTC_GetPlaybackStatus();
+
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    private static extern void SMTC_GetTimeline(out long position, out long duration);
+
+    // Controls
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    public static extern void SMTC_Play();
+    
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    public static extern void SMTC_Pause();
+    
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    public static extern void SMTC_Next();
+
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    public static extern void SMTC_VolumeUp();
+    
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    public static extern void SMTC_SetVolume(float volume);
 }
 ```
 
-### 3\. Python Calling Example (Quick Test/API Construction)
-For Python, use the ctypes module (relevant to your goal of using Python for quick API building):
+⚠️ Notes
 
-```Python
-import ctypes
-import atexit
-DLL_PATH = "SMTCBridge.dll" smtc_dll = ctypes.CDLL(DLL_PATH)
+✔ Resource Cleanup
 
-Configure function signatures
-smtc_dll.InitSMTC.restype = None smtc_dll.SMTC_GetTitle.argtypes = [ctypes.c_char_p, ctypes.c_int] smtc_dll.SMTC_GetTitle.restype = ctypes.c_int smtc_dll.SMTC_GetPlaybackStatus.restype = ctypes.c_bool smtc_dll.ShutdownSMTC.restype = None
+You must call ShutdownSMTC() when the application or mod exits.
+This ensures that WinRT event listeners are properly unregistered and resources are released.
+Failure to do so may result in hanging threads, application freezes, or crashes.
 
-Ensure ShutdownSMTC is called upon program exit
-atexit.register(lambda: smtc_dll.ShutdownSMTC())
+✔ Character Encoding
 
-String retrieval helper function (to match C++ logic)
-def get_title(): # 1. Call once to get the length required_length = smtc_dll.SMTC_GetTitle(None, 0) if required_length <= 0: return ""
-
-# 2. Call again to fill the buffer
-buffer_size = required_length + 1
-buffer = ctypes.create_string_buffer(buffer_size)
-smtc_dll.SMTC_GetTitle(buffer, buffer_size)
-Decode using utf-8 to match C++'s strncpy_s output
-return buffer.value.decode('utf-8', errors='ignore')
-
-Example Call
-smtc_dll.InitSMTC()
-
-... wait 2 seconds for WinRT initialization
-print(f"Current Title: {get_title()}") print(f"Is Playing: {smtc_dll.SMTC_GetPlaybackStatus()}") smtc_dll.SMTC_PlayPause()
-```
-
-## ⚠️ Important Notes
-Resource Cleanup: You must call ShutdownSMTC() when your application or Mod exits to safely detach WinRT event listeners and release resources. Failure to do so can lead to program freezing or crashes due to dangling threads.
-
-Thread Safety: The C++ internal implementation uses std::mutex to protect the cached media data (g_title, g_isPlaying, etc.), ensuring data safety between the asynchronous WinRT background threads and your main calling thread.
-
-Character Set: The exported strings use char* and strncpy_s, which means they are output as ANSI/UTF-8 encoded strings. Ensure your consuming application (C# or Python) uses the corresponding encoding (e.g., decode('utf-8') in the Python example) for correct interpretation.
+All exported strings are char* (ANSI / UTF-8).
+Make sure to handle them as UTF-8 on the C# or Python side.
+For example, in Python use .decode("utf-8").

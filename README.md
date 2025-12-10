@@ -51,6 +51,7 @@ To build this library, the following requirements must be met:
 | SMTC_VolumeUp() | Increase system volume by 5% |
 | SMTC_VolumeDown() | Decrease system volume by 5% |
 | SMTC_SetVolume(float volume) | Set the system volume directly (0.0 – 1.0) |
+SMTC_SetTimeline(long long positionTicks)| Set the current timeline|
 
 # Usage
 
@@ -139,6 +140,9 @@ public sealed class SMTCWrapper : IDisposable
     
     [DllImport(DllName, CallingConvention = NativeCall)]
     public static extern void SMTC_SetVolume(float volume);
+
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    public static extern void SMTC_SetTimeline(long postionTicks);
 }
 ```
 

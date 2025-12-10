@@ -453,3 +453,8 @@ extern "C" __declspec(dllexport) int SMTC_GetCoverImage(uint8_t* buffer, int len
     memcpy(buffer, g_coverBuffer.data(), copyLen);
     return copyLen;
 }
+extern "C" __declspec(dllexport) void SMTC_SetTimeline(long long positionTicks) {
+    EnqueueControl([positionTicks](auto session) {
+        session.TryChangePlaybackPositionAsync(positionTicks);
+        });
+}

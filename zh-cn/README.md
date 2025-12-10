@@ -51,6 +51,7 @@ English | 简体中文
 |SMTC_VolumeUp()|增加系统音量 (5%)|
 |SMTC_VolumeUp()|降低系统音量 (5%)|
 |SMTC_SetVolume(float volume)|直接设置系统音量(0.0-1.0)|
+|SMTC_SetTimeline(long long positionTicks)| 设置歌曲进度为指定tick（100ns/tick） |
 
 # 使用
 
@@ -138,6 +139,9 @@ public sealed class SMTCWrapper : IDisposable
     
     [DllImport(DllName, CallingConvention = NativeCall)]
     public static extern void SMTC_SetVolume(float volume);
+
+    [DllImport(DllName, CallingConvention = NativeCall)]
+    public static extern void SMTC_SetTimeline(long positionTicks);
 }
 ```
 

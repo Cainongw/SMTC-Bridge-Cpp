@@ -1,5 +1,7 @@
 # SMTC-Bridge-Cpp
 
+**此仓库已不在维护，新功能与更新请查看[smtc_bridge_rust](https://github.com/Cainongw/smtc_bridge_rust)**
+
 English | 简体中文
 
 **SMTCBridge** 是一个轻量级的 C++ 动态链接库（DLL），用于将 Windows 的系统媒体传输控制（SMTC）以及主音量控制功能桥接到非原生语言（如 C# —— 用于 Unity/BepInEx Modding）和 Python。

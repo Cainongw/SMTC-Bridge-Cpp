@@ -1,5 +1,7 @@
 # SMTC-Bridge-Cpp
 
+**This repository is no longer maintained. For related new features and updates, please check [smtc_bridge_rust](https://github.com/Cainongw/smtc_bridge_rust)**
+
 English | [简体中文](https://github.com/Cainongw/SMTC-Bridge-Cpp/tree/master/zh-cn)
 
 **SMTCBridge** is a lightweight C++ Dynamic Link Library (DLL) designed to bridge Windows System Media Transport Controls (SMTC) and master volume control functionality to non-native languages such as C# (for Unity/BepInEx modding) and Python.

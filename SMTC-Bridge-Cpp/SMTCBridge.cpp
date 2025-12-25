@@ -17,6 +17,8 @@
 #include <winrt/Windows.Storage.Streams.h>
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
+#include <audiopolicy.h>  // 新增：用于 IAudioSessionManager2, IAudioSessionControl 等
+#include <Psapi.h>        // 新增：用于 GetProcessImageFileNameW
 #pragma comment(lib, "Ole32.lib")
 
 using namespace winrt;
@@ -100,6 +102,379 @@ static void SetSystemVolumeTo(float targetVolume) {
     pVolume->SetMasterVolumeLevelScalar(targetVolume, nullptr);
 
     pVolume->Release();
+}
+
+// ================= 进程音量控制 (Audio Session) =================
+
+// 从 SourceAppUserModelId 提取用于匹配的关键字（小写）
+// UWP 格式: "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"
+// 桌面应用: "C:\Program Files\Spotify\Spotify.exe"
+static std::vector<std::wstring> ExtractMatchKeywords(const std::wstring& appId) {
+    std::vector<std::wstring> keywords;
+    
+    std::wstring appIdLower = appId;
+    std::transform(appIdLower.begin(), appIdLower.end(), appIdLower.begin(), ::towlower);
+    
+    // 添加完整 appId
+    keywords.push_back(appIdLower);
+    
+    // 检查是否是 UWP 格式 (包含 ! 和 _)
+    size_t exclamationPos = appIdLower.find(L'!');
+    size_t underscorePos = appIdLower.find(L'_');
+    
+    if (exclamationPos != std::wstring::npos && underscorePos != std::wstring::npos && underscorePos < exclamationPos) {
+        // UWP 格式: "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"
+        // 提取包名部分: "AppleInc.AppleMusicWin"
+        std::wstring packageName = appIdLower.substr(0, underscorePos);
+        keywords.push_back(packageName);
+        
+        // 提取最后一个点之后的名称: "AppleMusicWin" -> "applemusicwin"
+        size_t lastDot = packageName.find_last_of(L'.');
+        if (lastDot != std::wstring::npos) {
+            std::wstring appName = packageName.substr(lastDot + 1);
+            keywords.push_back(appName);
+            
+            // 尝试提取更简短的名称 (去掉 "Win" 后缀): "applemusic"
+            if (appName.size() > 3) {
+                size_t winPos = appName.rfind(L"win");
+                if (winPos != std::wstring::npos && winPos == appName.size() - 3) {
+                    keywords.push_back(appName.substr(0, winPos));
+                }
+            }
+        }
+        
+        // 提取发布者前缀: "appleinc"
+        size_t firstDot = packageName.find(L'.');
+        if (firstDot != std::wstring::npos) {
+            keywords.push_back(packageName.substr(0, firstDot));
+        }
+    }
+    else {
+        // 桌面应用格式: 提取 exe 名称
+        size_t lastSlash = appIdLower.find_last_of(L"\\/");
+        if (lastSlash != std::wstring::npos) {
+            std::wstring exeName = appIdLower.substr(lastSlash + 1);
+            keywords.push_back(exeName);
+            
+            // 去掉 .exe
+            size_t extPos = exeName.find(L".exe");
+            if (extPos != std::wstring::npos) {
+                keywords.push_back(exeName.substr(0, extPos));
+            }
+        }
+    }
+    
+    return keywords;
+}
+
+// 从进程 ID 获取可执行文件名（小写）
+static std::wstring GetProcessExeName(DWORD processId) {
+    std::wstring exeName;
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (hProcess) {
+        WCHAR path[MAX_PATH] = { 0 };
+        DWORD size = MAX_PATH;
+        if (QueryFullProcessImageNameW(hProcess, 0, path, &size)) {
+            std::wstring fullPath(path);
+            size_t lastSlash = fullPath.find_last_of(L"\\/");
+            if (lastSlash != std::wstring::npos) {
+                exeName = fullPath.substr(lastSlash + 1);
+            } else {
+                exeName = fullPath;
+            }
+            std::transform(exeName.begin(), exeName.end(), exeName.begin(), ::towlower);
+        }
+        CloseHandle(hProcess);
+    }
+    return exeName;
+}
+
+// 检查会话是否匹配
+static bool MatchAudioSession(IAudioSessionControl2* pSessionControl2, 
+                               const std::vector<std::wstring>& keywords) {
+    if (!pSessionControl2 || keywords.empty()) return false;
+    
+    // 方法1: 通过 SessionInstanceIdentifier 匹配
+    LPWSTR sessionId = nullptr;
+    HRESULT hr = pSessionControl2->GetSessionInstanceIdentifier(&sessionId);
+    if (SUCCEEDED(hr) && sessionId) {
+        std::wstring sessionIdLower(sessionId);
+        std::transform(sessionIdLower.begin(), sessionIdLower.end(), sessionIdLower.begin(), ::towlower);
+        CoTaskMemFree(sessionId);
+        
+        for (const auto& keyword : keywords) {
+            if (!keyword.empty() && sessionIdLower.find(keyword) != std::wstring::npos) {
+                return true;
+            }
+        }
+    }
+    
+    // 方法2: 通过 SessionIdentifier 匹配
+    LPWSTR sessionIdentifier = nullptr;
+    hr = pSessionControl2->GetSessionIdentifier(&sessionIdentifier);
+    if (SUCCEEDED(hr) && sessionIdentifier) {
+        std::wstring idLower(sessionIdentifier);
+        std::transform(idLower.begin(), idLower.end(), idLower.begin(), ::towlower);
+        CoTaskMemFree(sessionIdentifier);
+        
+        for (const auto& keyword : keywords) {
+            if (!keyword.empty() && idLower.find(keyword) != std::wstring::npos) {
+                return true;
+            }
+        }
+    }
+    
+    // 方法3: 通过 DisplayName 匹配
+    IAudioSessionControl* pSessionControl = nullptr;
+    hr = pSessionControl2->QueryInterface(__uuidof(IAudioSessionControl), (void**)&pSessionControl);
+    if (SUCCEEDED(hr) && pSessionControl) {
+        LPWSTR displayName = nullptr;
+        hr = pSessionControl->GetDisplayName(&displayName);
+        if (SUCCEEDED(hr) && displayName) {
+            std::wstring nameLower(displayName);
+            std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::towlower);
+            CoTaskMemFree(displayName);
+            
+            // 移除空格进行模糊匹配
+            std::wstring nameNoSpace;
+            for (wchar_t c : nameLower) {
+                if (c != L' ') nameNoSpace += c;
+            }
+            
+            for (const auto& keyword : keywords) {
+                if (!keyword.empty()) {
+                    if (nameLower.find(keyword) != std::wstring::npos ||
+                        nameNoSpace.find(keyword) != std::wstring::npos) {
+                        pSessionControl->Release();
+                        return true;
+                    }
+                }
+            }
+        }
+        pSessionControl->Release();
+    }
+    
+    // 方法4: 通过进程名匹配
+    DWORD processId = 0;
+    hr = pSessionControl2->GetProcessId(&processId);
+    if (SUCCEEDED(hr) && processId != 0) {
+        std::wstring exeName = GetProcessExeName(processId);
+        if (!exeName.empty()) {
+            // 去掉 .exe 后缀
+            std::wstring exeBase = exeName;
+            size_t extPos = exeBase.find(L".exe");
+            if (extPos != std::wstring::npos) {
+                exeBase = exeBase.substr(0, extPos);
+            }
+            
+            for (const auto& keyword : keywords) {
+                if (!keyword.empty()) {
+                    if (exeName.find(keyword) != std::wstring::npos ||
+                        exeBase.find(keyword) != std::wstring::npos ||
+                        keyword.find(exeBase) != std::wstring::npos) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    return false;
+}
+
+// 根据当前 SMTC session 的进程查找对应的音频会话并设置音量
+static bool SetSessionVolumeByProcess(float targetVolume) {
+    if (!g_currentSession) return false;
+    
+    if (targetVolume < 0.0f) targetVolume = 0.0f;
+    if (targetVolume > 1.0f) targetVolume = 1.0f;
+    
+    std::wstring appId;
+    try {
+        hstring hAppId = g_currentSession.SourceAppUserModelId();
+        appId = std::wstring(hAppId.c_str());
+    } catch (...) {
+        return false;
+    }
+    
+    if (appId.empty()) return false;
+    
+    std::vector<std::wstring> keywords = ExtractMatchKeywords(appId);
+    
+    HRESULT hr = S_OK;
+    IMMDeviceEnumerator* pEnumerator = nullptr;
+    IMMDevice* pDevice = nullptr;
+    IAudioSessionManager2* pSessionManager = nullptr;
+    IAudioSessionEnumerator* pSessionEnumerator = nullptr;
+    bool success = false;
+    
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                          __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator);
+    if (FAILED(hr) || !pEnumerator) goto cleanup;
+    
+    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
+    if (FAILED(hr) || !pDevice) goto cleanup;
+    
+    hr = pDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_INPROC_SERVER,
+                           nullptr, (void**)&pSessionManager);
+    if (FAILED(hr) || !pSessionManager) goto cleanup;
+    
+    hr = pSessionManager->GetSessionEnumerator(&pSessionEnumerator);
+    if (FAILED(hr) || !pSessionEnumerator) goto cleanup;
+    
+    {
+        int sessionCount = 0;
+        hr = pSessionEnumerator->GetCount(&sessionCount);
+        if (FAILED(hr)) goto cleanup;
+        
+        for (int i = 0; i < sessionCount; i++) {
+            IAudioSessionControl* pSessionControl = nullptr;
+            IAudioSessionControl2* pSessionControl2 = nullptr;
+            ISimpleAudioVolume* pSimpleVolume = nullptr;
+            
+            hr = pSessionEnumerator->GetSession(i, &pSessionControl);
+            if (FAILED(hr) || !pSessionControl) {
+                if (pSessionControl) pSessionControl->Release();
+                continue;
+            }
+            
+            hr = pSessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pSessionControl2);
+            if (FAILED(hr) || !pSessionControl2) {
+                pSessionControl->Release();
+                continue;
+            }
+            
+            // 跳过系统音效会话
+            if (pSessionControl2->IsSystemSoundsSession() == S_OK) {
+                pSessionControl2->Release();
+                pSessionControl->Release();
+                continue;
+            }
+            
+            if (MatchAudioSession(pSessionControl2, keywords)) {
+                hr = pSessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&pSimpleVolume);
+                if (SUCCEEDED(hr) && pSimpleVolume) {
+                    hr = pSimpleVolume->SetMasterVolume(targetVolume, nullptr);
+                    if (SUCCEEDED(hr)) {
+                        success = true;
+                    }
+                    pSimpleVolume->Release();
+                }
+            }
+            
+            pSessionControl2->Release();
+            pSessionControl->Release();
+            
+            if (success) break;
+        }
+    }
+    
+cleanup:
+    if (pSessionEnumerator) pSessionEnumerator->Release();
+    if (pSessionManager) pSessionManager->Release();
+    if (pDevice) pDevice->Release();
+    if (pEnumerator) pEnumerator->Release();
+    
+    return success;
+}
+
+// 根据当前 SMTC session 的进程调整音量
+static bool ChangeSessionVolumeBy(double delta) {
+    if (!g_currentSession) return false;
+    
+    std::wstring appId;
+    try {
+        hstring hAppId = g_currentSession.SourceAppUserModelId();
+        appId = std::wstring(hAppId.c_str());
+    } catch (...) {
+        return false;
+    }
+    
+    if (appId.empty()) return false;
+    
+    std::vector<std::wstring> keywords = ExtractMatchKeywords(appId);
+    
+    HRESULT hr = S_OK;
+    IMMDeviceEnumerator* pEnumerator = nullptr;
+    IMMDevice* pDevice = nullptr;
+    IAudioSessionManager2* pSessionManager = nullptr;
+    IAudioSessionEnumerator* pSessionEnumerator = nullptr;
+    bool success = false;
+    
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER,
+                          __uuidof(IMMDeviceEnumerator), (void**)&pEnumerator);
+    if (FAILED(hr) || !pEnumerator) goto cleanup;
+    
+    hr = pEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &pDevice);
+    if (FAILED(hr) || !pDevice) goto cleanup;
+    
+    hr = pDevice->Activate(__uuidof(IAudioSessionManager2), CLSCTX_INPROC_SERVER,
+                           nullptr, (void**)&pSessionManager);
+    if (FAILED(hr) || !pSessionManager) goto cleanup;
+    
+    hr = pSessionManager->GetSessionEnumerator(&pSessionEnumerator);
+    if (FAILED(hr) || !pSessionEnumerator) goto cleanup;
+    
+    {
+        int sessionCount = 0;
+        hr = pSessionEnumerator->GetCount(&sessionCount);
+        if (FAILED(hr)) goto cleanup;
+        
+        for (int i = 0; i < sessionCount; i++) {
+            IAudioSessionControl* pSessionControl = nullptr;
+            IAudioSessionControl2* pSessionControl2 = nullptr;
+            ISimpleAudioVolume* pSimpleVolume = nullptr;
+            
+            hr = pSessionEnumerator->GetSession(i, &pSessionControl);
+            if (FAILED(hr) || !pSessionControl) {
+                if (pSessionControl) pSessionControl->Release();
+                continue;
+            }
+            
+            hr = pSessionControl->QueryInterface(__uuidof(IAudioSessionControl2), (void**)&pSessionControl2);
+            if (FAILED(hr) || !pSessionControl2) {
+                pSessionControl->Release();
+                continue;
+            }
+            
+            if (pSessionControl2->IsSystemSoundsSession() == S_OK) {
+                pSessionControl2->Release();
+                pSessionControl->Release();
+                continue;
+            }
+            
+            if (MatchAudioSession(pSessionControl2, keywords)) {
+                hr = pSessionControl->QueryInterface(__uuidof(ISimpleAudioVolume), (void**)&pSimpleVolume);
+                if (SUCCEEDED(hr) && pSimpleVolume) {
+                    float currentVolume = 0.0f;
+                    hr = pSimpleVolume->GetMasterVolume(&currentVolume);
+                    if (SUCCEEDED(hr)) {
+                        float newVolume = currentVolume + static_cast<float>(delta);
+                        if (newVolume < 0.0f) newVolume = 0.0f;
+                        if (newVolume > 1.0f) newVolume = 1.0f;
+                        hr = pSimpleVolume->SetMasterVolume(newVolume, nullptr);
+                        if (SUCCEEDED(hr)) {
+                            success = true;
+                        }
+                    }
+                    pSimpleVolume->Release();
+                }
+            }
+            
+            pSessionControl2->Release();
+            pSessionControl->Release();
+            
+            if (success) break;
+        }
+    }
+    
+cleanup:
+    if (pSessionEnumerator) pSessionEnumerator->Release();
+    if (pSessionManager) pSessionManager->Release();
+    if (pDevice) pDevice->Release();
+    if (pEnumerator) pEnumerator->Release();
+    
+    return success;
 }
 
 // ================= 辅助函数 =================
@@ -416,9 +791,28 @@ extern "C" __declspec(dllexport) void SMTC_Play() { EnqueueControl([](auto sessi
 extern "C" __declspec(dllexport) void SMTC_Pause() { EnqueueControl([](auto session) { session.TryPauseAsync(); }); }
 extern "C" __declspec(dllexport) void SMTC_Next() { EnqueueControl([](auto session) { session.TrySkipNextAsync(); }); }
 extern "C" __declspec(dllexport) void SMTC_Previous() { EnqueueControl([](auto session) { session.TrySkipPreviousAsync(); }); }
-extern "C" __declspec(dllexport) void SMTC_VolumeUp() { EnqueueTask([]() { try { ChangeSystemVolumeBy(0.05); } catch (...) {} }); }
-extern "C" __declspec(dllexport) void SMTC_VolumeDown() { EnqueueTask([]() { try { ChangeSystemVolumeBy(-0.05); } catch (...) {} }); }
-extern "C" __declspec(dllexport) void SMTC_SetVolume(float volume) {EnqueueTask([volume]() {try { SetSystemVolumeTo(volume); }catch (...) {} });
+
+// 修改后的音量控制：仅控制播放器进程音量，不回退到系统音量
+extern "C" __declspec(dllexport) void SMTC_VolumeUp() { 
+    EnqueueTask([]() { 
+        try { 
+            ChangeSessionVolumeBy(0.05);
+        } catch (...) {} 
+    }); 
+}
+extern "C" __declspec(dllexport) void SMTC_VolumeDown() { 
+    EnqueueTask([]() { 
+        try { 
+            ChangeSessionVolumeBy(-0.05);
+        } catch (...) {} 
+    }); 
+}
+extern "C" __declspec(dllexport) void SMTC_SetVolume(float volume) {
+    EnqueueTask([volume]() {
+        try { 
+            SetSessionVolumeByProcess(volume);
+        } catch (...) {} 
+    });
 }
 
 
